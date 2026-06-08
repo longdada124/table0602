@@ -76,6 +76,7 @@ with st.sidebar:
                 # 存入 Session 供後續下載使用
                 st.session_state.class_template = class_temp
                 st.session_state.teacher_template = teacher_temp
+                st.session_state.df_assign = df_assign  # 【新增】保留原始配課表 DataFrame
 
                 # 1. 解析配課 (多師共課)
                 assign_lookup, all_teachers_db, tutors = [], set(), {}
@@ -113,10 +114,10 @@ with st.sidebar:
                     if not (p_match and d > 0): continue
                     p = int(p_match.group())
 
-                    # 修正：先檢查科目是否為空，如果是空的，就不去配課表找老師
+                    # 修正：先檢查科目是否為空
                     if not s_raw or s_raw == "nan" or s_raw == "":
                         display_t = ""
-                        s_raw = ""  # 讓科目也保持空白，不要出現 nan
+                        s_raw = ""  
                     else:
                         curr_t_list = [item['t'] for item in assign_lookup if item['c'] == c_raw and item['s'] == s_raw]
                         display_t = "/".join(curr_t_list) if curr_t_list else "未知教師"
@@ -136,9 +137,10 @@ with st.sidebar:
                 })
                 st.rerun()
 
-# --- 主介面與預覽 (代碼同前，保留班級預覽顯示科目(老師)功能) ---
+# --- 主介面與預覽 ---
 if 'class_data' in st.session_state:
-    tab1, tab2 = st.tabs(["🏫 班級課表", "👩‍🏫 教師課表"])
+    # 【修改】新增第三個配課總覽與匯出頁籤
+    tab1, tab2, tab3 = st.tabs(["🏫 班級課表", "👩‍🏫 教師課表", "📋 配課總覽與分頁匯出"])
 
     with tab1:
         classes = sorted(list(st.session_state.class_data.keys()))
@@ -166,7 +168,6 @@ if 'class_data' in st.session_state:
         with bc1:
             if st.button(f"📥 下載 {target_c} 課表"):
                 doc = Document(BytesIO(st.session_state.class_template))
-                # [關鍵修正 1]：執行班級與導師的替換
                 master_replace(doc, "{{CLASS}}", target_c)
                 tutor_name = st.session_state.tutors_map.get(target_c, "未設定")
                 master_replace(doc, "{{TUTOR}}", tutor_name) 
@@ -199,7 +200,6 @@ if 'class_data' in st.session_state:
                     buf = BytesIO(); main_doc.save(buf); st.download_button("💾 下載班級彙整檔", buf.getvalue(), "全校班級課表.docx")
 
     with tab2:
-        # (教師標籤頁同樣保留原本強大的預覽與下載功能)
         teachers = st.session_state.ordered_teachers
         curr_t = st.session_state.get('sel_teacher', teachers[0])
         colt1, colt2, colt3 = st.columns([1, 2, 1])
@@ -243,15 +243,40 @@ if 'class_data' in st.session_state:
                         for el in tmp.element.body: main_doc.element.body.append(el)
                 if main_doc:
                     buf = BytesIO(); main_doc.save(buf); st.download_button("💾 下載教師彙整檔", buf.getvalue(), "全校教師課表_彙整.docx")
+
+    # 【新增】第三個標籤頁邏輯：顯示配課總覽並自動生成多工作表 Excel 匯出
+    with tab3:
+        st.header("📋 全校配課資料總覽")
+        if "df_assign" in st.session_state:
+            st.write("💡 **提示**：下方顯示您所上傳的原始單一配課表。點擊最下方的按鈕，系統將自動依據「班級」欄位將資料拆分，產出含有**多個班級分頁**的 Excel 活頁簿。")
+            
+            # 網頁資料預覽
+            st.dataframe(st.session_state.df_assign, use_container_width=True)
+            
+            st.divider()
+            st.subheader("📥 匯出「一班一工作表」Excel 檔案")
+            st.info("系統正自動依據「班級」進行分組建檔...")
+            
+            # 在記憶體中動態生成多工作表 Excel
+            buf_excel = BytesIO()
+            with pd.ExcelWriter(buf_excel, engine='openpyxl') as writer:
+                # 依班級分組，cname 為工作表名稱，group 為該班級的資料
+                for cname, group in st.session_state.df_assign.groupby('班級'):
+                    # 乾淨處理工作表名稱：過濾 Excel 不允許的字元（\ / ? * : [ ]），並限制長度 31 字元
+                    clean_sheet_name = str(cname).strip()
+                    clean_sheet_name = re.sub(r'[\\/*?:\[\]]', '', clean_sheet_name)[:31]
+                    if not clean_sheet_name:
+                        clean_sheet_name = "未命名班級"
+                    
+                    # 將該班資料寫入對應的工作表
+                    group.to_excel(writer, sheet_name=clean_sheet_name, index=False)
+            
+            # 提供下載按鈕
+            st.download_button(
+                label="💾 點我下載「各班級獨立分頁」配課明細表.xlsx",
+                data=buf_excel.getvalue(),
+                file_name="全校各班級配課明細表_分頁版.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 else:
     st.info("👋 請上傳資料檔並點擊執行整合。")
-
-
-
-
-
-
-
-
-
-
