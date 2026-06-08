@@ -24,14 +24,20 @@ def master_replace(doc_obj, old_text, new_text):
             for i, run in enumerate(p.runs):
                 run.text = updated_text if i == 0 else ""
 
-# --- 讀取內建樣板函數 ---
+import os  # 如果最上方沒有，請補上這行
+
+# --- 讀取內建樣板函數 (安全絕對路徑版) ---
 def load_default_template(file_name):
     try:
-        with open(file_name, "rb") as f:
+        # 1. 取得目前這支程式碼 (classtable.py) 所在的真實資料夾路徑
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # 2. 將資料夾路徑與檔名結合
+        full_path = os.path.join(current_dir, file_name)
+        
+        with open(full_path, "rb") as f:
             return f.read()
     except FileNotFoundError:
         return None
-
 # --- 側邊欄：徹底簡化 ---
 with st.sidebar:
     st.header("⚙️ 資料管理")
