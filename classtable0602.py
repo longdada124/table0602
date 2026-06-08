@@ -3,6 +3,8 @@ import pandas as pd
 from docx import Document
 from io import BytesIO
 import re
+import os
+import unicodedata  # 【新增】專治 Mac/Linux 中文檔名編碼不一致的工具
 
 st.set_page_config(page_title="課表彙整系統", layout="wide")
 
@@ -24,20 +26,28 @@ def master_replace(doc_obj, old_text, new_text):
             for i, run in enumerate(p.runs):
                 run.text = updated_text if i == 0 else ""
 
-import os  # 如果最上方沒有，請補上這行
-
-# --- 讀取內建樣板函數 (安全絕對路徑版) ---
+# --- 讀取內建樣板函數 (超強編碼相容暨自動除錯版) ---
 def load_default_template(file_name):
     try:
-        # 1. 取得目前這支程式碼 (classtable.py) 所在的真實資料夾路徑
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        # 2. 將資料夾路徑與檔名結合
         full_path = os.path.join(current_dir, file_name)
         
-        with open(full_path, "rb") as f:
-            return f.read()
-    except FileNotFoundError:
-        return None
+        # 1. 嘗試直接讀取
+        if os.path.exists(full_path):
+            with open(full_path, "rb") as f:
+                return f.read()
+        
+        # 2. 模糊比對：解決 Mac 上傳至 Linux 伺服器的 NFC/NFD 中文編碼衝突
+        target_filename_nfc = unicodedata.normalize('NFC', file_name)
+        for actual_file in os.listdir(current_dir):
+            actual_file_nfc = unicodedata.normalize('NFC', actual_file)
+            if actual_file_nfc == target_filename_nfc:
+                with open(os.path.join(current_dir, actual_file), "rb") as f:
+                    return f.read()
+    except Exception:
+        pass
+    return None
+
 # --- 側邊欄：徹底簡化 ---
 with st.sidebar:
     st.header("⚙️ 資料管理")
@@ -55,10 +65,15 @@ with st.sidebar:
     }
     for label, file_name in data_templates.items():
         try:
-            with open(file_name, "rb") as f:
-                st.download_button(label=f"{label}", data=f, file_name=file_name, key=f"dl_{file_name}")
-        except FileNotFoundError:
-            st.caption(f"⚠️ 找不到 {file_name}")
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            f_path = os.path.join(current_dir, file_name)
+            if os.path.exists(f_path):
+                with open(f_path, "rb") as f:
+                    st.download_button(label=f"{label}", data=f, file_name=file_name, key=f"dl_{file_name}")
+            else:
+                st.caption(f"⚠️ 找不到 {file_name}")
+        except Exception:
+            st.caption(f"⚠️ 讀取 {file_name} 失敗")
     st.divider()
 
     # --- 📤 僅保留資料上傳 ---
@@ -73,18 +88,21 @@ with st.sidebar:
         teacher_temp = load_default_template("教師樣板.docx")
         
         if not class_temp or not teacher_temp:
+            # 【除錯機制】如果還是找不到，直接抓出目前資料夾有哪些檔案並噴在網頁上
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            actual_files = os.listdir(current_dir) if os.path.exists(current_dir) else []
             st.error("❌ 系統錯誤：後台找不到「班級樣板.docx」或「教師樣板.docx」，請確認 GitHub 檔案。")
+            st.info(f"🔍 雲端伺服器目前實際看到的檔案清單：\n`{actual_files}`")
         else:
             with st.spinner("同步內建樣板與解析資料中..."):
                 df_assign = pd.read_csv(f_assign) if f_assign.name.endswith('.csv') else pd.read_excel(f_assign)
                 df_time = pd.read_csv(f_time) if f_time.name.endswith('.csv') else pd.read_excel(f_time)
                 
-                # 存入 Session 供後續下載使用
                 st.session_state.class_template = class_temp
                 st.session_state.teacher_template = teacher_temp
-                st.session_state.df_assign = df_assign  # 【新增】保留原始配課表 DataFrame
+                st.session_state.df_assign = df_assign
 
-                # 1. 解析配課 (多師共課)
+                # 1. 解析配課
                 assign_lookup, all_teachers_db, tutors = [], set(), {}
                 for _, row in df_assign.iterrows():
                     c, s, t_raw = str(row['班級']).strip(), str(row['科目']).strip(), str(row['教師']).strip()
@@ -120,7 +138,6 @@ with st.sidebar:
                     if not (p_match and d > 0): continue
                     p = int(p_match.group())
 
-                    # 修正：先檢查科目是否為空
                     if not s_raw or s_raw == "nan" or s_raw == "":
                         display_t = ""
                         s_raw = ""  
@@ -145,7 +162,6 @@ with st.sidebar:
 
 # --- 主介面與預覽 ---
 if 'class_data' in st.session_state:
-    # 【修改】新增第三個配課總覽與匯出頁籤
     tab1, tab2, tab3 = st.tabs(["🏫 班級課表", "👩‍🏫 教師課表", "📋 配課總覽與分頁匯出"])
 
     with tab1:
@@ -191,8 +207,7 @@ if 'class_data' in st.session_state:
             if st.button("🚀 執行班級合併列印"):
                 main_doc = None
                 for i, cname in enumerate(sel_c_batch):
-                    tmp = Document(BytesIO(st.session_state.class_template)); master_replace(tmp, "{{CLASS}}", cname)
-                    
+                    tmp = Document(BytesIO(st.session_state.class_template))
                     master_replace(tmp, "{{CLASS}}", cname)
                     master_replace(tmp, "{{TUTOR}}", st.session_state.tutors_map.get(cname, "未設定"))
                     
@@ -229,7 +244,7 @@ if 'class_data' in st.session_state:
                 master_replace(doc, "{{TEACHER}}", target_t); master_replace(doc, "{{BASE}}", base)
                 master_replace(doc, "{{TOTAL}}", total); master_replace(doc, "{{EXTRA}}", total-base)
                 for d, p in [(d,p) for d in range(1,6) for p in range(1,9)]:
-                    v = st.session_state.teacher_data[target_t].get((d,p), {"subj":"","class":""})
+                    v = os.session_state.teacher_data[target_t].get((d,p), {"subj":"","class":""})
                     master_replace(doc, f"{{{{CD{d}P{p}}}}}", v['class']); master_replace(doc, f"{{{{SD{d}P{p}}}}}", v['subj'])
                 buf = BytesIO(); doc.save(buf); st.download_button(f"💾 儲存 {target_t} 課表", buf.getvalue(), f"{target_t}_教師課表.docx")
         with bt2:
@@ -250,34 +265,22 @@ if 'class_data' in st.session_state:
                 if main_doc:
                     buf = BytesIO(); main_doc.save(buf); st.download_button("💾 下載教師彙整檔", buf.getvalue(), "全校教師課表_彙整.docx")
 
-    # 【新增】第三個標籤頁邏輯：顯示配課總覽並自動生成多工作表 Excel 匯出
     with tab3:
         st.header("📋 全校配課資料總覽")
         if "df_assign" in st.session_state:
             st.write("💡 **提示**：下方顯示您所上傳的原始單一配課表。點擊最下方的按鈕，系統將自動依據「班級」欄位將資料拆分，產出含有**多個班級分頁**的 Excel 活頁簿。")
-            
-            # 網頁資料預覽
             st.dataframe(st.session_state.df_assign, use_container_width=True)
-            
             st.divider()
             st.subheader("📥 匯出「一班一工作表」Excel 檔案")
-            st.info("系統正自動依據「班級」進行分組建檔...")
             
-            # 在記憶體中動態生成多工作表 Excel
             buf_excel = BytesIO()
             with pd.ExcelWriter(buf_excel, engine='openpyxl') as writer:
-                # 依班級分組，cname 為工作表名稱，group 為該班級的資料
                 for cname, group in st.session_state.df_assign.groupby('班級'):
-                    # 乾淨處理工作表名稱：過濾 Excel 不允許的字元（\ / ? * : [ ]），並限制長度 31 字元
                     clean_sheet_name = str(cname).strip()
                     clean_sheet_name = re.sub(r'[\\/*?:\[\]]', '', clean_sheet_name)[:31]
-                    if not clean_sheet_name:
-                        clean_sheet_name = "未命名班級"
-                    
-                    # 將該班資料寫入對應的工作表
+                    if not clean_sheet_name: clean_sheet_name = "未命名班級"
                     group.to_excel(writer, sheet_name=clean_sheet_name, index=False)
             
-            # 提供下載按鈕
             st.download_button(
                 label="💾 點我下載「各班級獨立分頁」配課明細表.xlsx",
                 data=buf_excel.getvalue(),
