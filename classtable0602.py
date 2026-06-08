@@ -4,7 +4,7 @@ from docx import Document
 from io import BytesIO
 import re
 import os
-import unicodedata  # 【新增】專治 Mac/Linux 中文檔名編碼不一致的工具
+import unicodedata
 
 st.set_page_config(page_title="課表彙整系統", layout="wide")
 
@@ -26,18 +26,16 @@ def master_replace(doc_obj, old_text, new_text):
             for i, run in enumerate(p.runs):
                 run.text = updated_text if i == 0 else ""
 
-# --- 讀取內建樣板函數 (超強編碼相容暨自動除錯版) ---
+# --- 讀取內建樣板函數 (編碼相容版) ---
 def load_default_template(file_name):
     try:
         current_dir = os.path.dirname(os.path.abspath(__file__))
         full_path = os.path.join(current_dir, file_name)
         
-        # 1. 嘗試直接讀取
         if os.path.exists(full_path):
             with open(full_path, "rb") as f:
                 return f.read()
         
-        # 2. 模糊比對：解決 Mac 上傳至 Linux 伺服器的 NFC/NFD 中文編碼衝突
         target_filename_nfc = unicodedata.normalize('NFC', file_name)
         for actual_file in os.listdir(current_dir):
             actual_file_nfc = unicodedata.normalize('NFC', actual_file)
@@ -48,14 +46,13 @@ def load_default_template(file_name):
         pass
     return None
 
-# --- 側邊欄：徹底簡化 ---
+# --- 側邊欄：資料管理 ---
 with st.sidebar:
     st.header("⚙️ 資料管理")
     if st.button("🧹 清空重置系統"):
         for key in list(st.session_state.keys()): del st.session_state[key]
         st.rerun()
 
-    # --- 📥 僅保留資料範本下載 ---
     st.divider()
     st.subheader("📥 範本下載")
     data_templates = {
@@ -76,19 +73,16 @@ with st.sidebar:
             st.caption(f"⚠️ 讀取 {file_name} 失敗")
     st.divider()
 
-    # --- 📤 僅保留資料上傳 ---
     st.subheader("📤 上傳資料檔")
     f_assign = st.file_uploader("1. 上傳【配課表】", type=["xlsx", "csv"])
     f_time = st.file_uploader("2. 上傳【課表】", type=["xlsx", "csv"])
     f_sort = st.file_uploader("3. 上傳【教師排序暨時數表】", type=["xlsx", "csv"])
     
     if f_assign and f_time and st.button("🚀 執行整合"):
-        # 自動抓取後台 Word 樣板
         class_temp = load_default_template("班級樣板.docx")
         teacher_temp = load_default_template("教師樣板.docx")
         
         if not class_temp or not teacher_temp:
-            # 【除錯機制】如果還是找不到，直接抓出目前資料夾有哪些檔案並噴在網頁上
             current_dir = os.path.dirname(os.path.abspath(__file__))
             actual_files = os.listdir(current_dir) if os.path.exists(current_dir) else []
             st.error("❌ 系統錯誤：後台找不到「班級樣板.docx」或「教師樣板.docx」，請確認 GitHub 檔案。")
@@ -102,18 +96,54 @@ with st.sidebar:
                 st.session_state.teacher_template = teacher_temp
                 st.session_state.df_assign = df_assign
 
-                # 1. 解析配課
-                assign_lookup, all_teachers_db, tutors = [], set(), {}
-                for _, row in df_assign.iterrows():
-                    c, s, t_raw = str(row['班級']).strip(), str(row['科目']).strip(), str(row['教師']).strip()
-                    t_list = [name.strip() for name in t_raw.split('/')]
-                    for t in t_list:
-                        if t and t != "nan":
-                            assign_lookup.append({'c': c, 's': s, 't': t})
-                            all_teachers_db.add(t)
-                    if s == "班級": tutors[c] = t_raw
+                # --- 1. 解析配課 (智慧雙模解析：支援一維傳統表 & 二維矩陣表) ---
+                assign_lookup = []
+                all_teachers_db = set()
+                tutors = {}
 
-                # 2. 教師排序與時數
+                # 確保欄位名稱乾淨
+                df_assign.columns = [str(c).strip() for c in df_assign.columns]
+
+                if '科目' in df_assign.columns and '教師' in df_assign.columns:
+                    # 【模式 A】傳統一維清單格式
+                    for _, row in df_assign.iterrows():
+                        c, s, t_raw = str(row['班級']).strip(), str(row['科目']).strip(), str(row['教師']).strip()
+                        t_list = [name.strip() for name in t_raw.split('/')]
+                        for t in t_list:
+                            if t and t != "nan":
+                                assign_lookup.append({'c': c, 's': s, 't': t})
+                                all_teachers_db.add(t)
+                        if s == "班級": 
+                            tutors[c] = t_raw
+                else:
+                    # 【模式 B】全新二維矩陣表格格式 (精髓所在！)
+                    if '導師' in df_assign.columns:
+                        for _, row in df_assign.iterrows():
+                            c = str(row['班級']).strip()
+                            t_tutor = str(row['導師']).strip()
+                            if t_tutor and t_tutor != "nan":
+                                tutors[c] = t_tutor
+
+                    # 排除非科目的固定欄位，將其餘科目欄位通通熔解 (Melt) 拉直
+                    subject_cols = [col for col in df_assign.columns if col not in ['班級', '導師']]
+                    df_melted = pd.melt(df_assign, id_vars=['班級'], value_vars=subject_cols, var_name='科目', value_name='教師')
+                    
+                    for _, row in df_melted.iterrows():
+                        c = str(row['班級']).strip()
+                        s = str(row['科目']).strip()
+                        t_raw = str(row['教師']).strip() if pd.notna(row['教師']) else ""
+                        
+                        if not t_raw or t_raw == "nan" or t_raw == "":
+                            continue
+                        
+                        # 支援多師共課，如「張三/李四」
+                        t_list = [name.strip() for name in t_raw.split('/')]
+                        for t in t_list:
+                            if t and t != "nan" and t != "":
+                                assign_lookup.append({'c': c, 's': s, 't': t})
+                                all_teachers_db.add(t)
+
+                # --- 2. 教師排序與時數 ---
                 ordered_teachers, base_hours, all_teachers_list = [], {}, list(all_teachers_db)
                 if f_sort:
                     df_s = pd.read_csv(f_sort) if f_sort.name.endswith('.csv') else pd.read_excel(f_sort)
@@ -129,7 +159,7 @@ with st.sidebar:
                     ordered_teachers = sorted(all_teachers_list)
                     base_hours = {t: 0 for t in ordered_teachers}
 
-                # 3. 解析課表
+                # --- 3. 解析課表 ---
                 class_data, teacher_data, total_counts = {}, {}, {}
                 day_map = {"一":1,"二":2,"三":3,"四":4,"五":5,"週一":1,"週二":2,"週三":3,"週四":4,"週五":5}
                 for _, row in df_time.iterrows():
@@ -244,7 +274,8 @@ if 'class_data' in st.session_state:
                 master_replace(doc, "{{TEACHER}}", target_t); master_replace(doc, "{{BASE}}", base)
                 master_replace(doc, "{{TOTAL}}", total); master_replace(doc, "{{EXTRA}}", total-base)
                 for d, p in [(d,p) for d in range(1,6) for p in range(1,9)]:
-                    v = os.session_state.teacher_data[target_t].get((d,p), {"subj":"","class":""})
+                    # 【已修正 Bug】將原先錯誤的 os.session_state 修正為 st.session_state
+                    v = st.session_state.teacher_data[target_t].get((d,p), {"subj":"","class":""})
                     master_replace(doc, f"{{{{CD{d}P{p}}}}}", v['class']); master_replace(doc, f"{{{{SD{d}P{p}}}}}", v['subj'])
                 buf = BytesIO(); doc.save(buf); st.download_button(f"💾 儲存 {target_t} 課表", buf.getvalue(), f"{target_t}_教師課表.docx")
         with bt2:
